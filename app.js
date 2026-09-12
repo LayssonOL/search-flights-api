@@ -13,11 +13,14 @@
 
 require("dotenv").config();
 const express = require("express");
+const crypto = require("crypto");
 const app = express();
 app.use(express.json());
 
 const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY;
-const DUFFEL_URL = "https://api.duffel.com/air/offer_requests";
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const DUFFEL_URL = process.env.DUFFEL_URL;
 
 app.post("/tools/search-flights", async (req, res) => {
   try {
@@ -114,6 +117,70 @@ app.post("/tools/search-flights", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Unexpected error searching flights." });
+  }
+});
+
+async function redisSet(key, value) {
+  const res = await fetch(`${UPSTASH_URL}/set/${key}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    body: JSON.stringify(value),
+  });
+  return res.ok;
+}
+
+async function redisSadd(setKey, member) {
+  await fetch(`${UPSTASH_URL}/sadd/${setKey}/${member}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+  });
+}
+
+app.post("/tools/watch-price", async (req, res) => {
+  try {
+    const {
+      origin,
+      destination,
+      departure_date,
+      return_date, // optional
+      cabin_class = "economy",
+      target_price, // optional — number, in USD
+      email,
+    } = req.body;
+
+    if (!origin || !destination || !departure_date || !email) {
+      return res.status(400).json({
+        error: "origin, destination, departure_date, and email are required",
+      });
+    }
+
+    const watchId = crypto.randomUUID();
+    const record = {
+      id: watchId,
+      origin,
+      destination,
+      departure_date,
+      return_date: return_date || null,
+      cabin_class,
+      target_price: target_price || null,
+      email,
+      last_seen_price: null,
+      created_at: new Date().toISOString(),
+    };
+
+    await redisSet(`watch:${watchId}`, record);
+    await redisSadd("watch:index", watchId);
+
+    return res.json({
+      registered: true,
+      watch_id: watchId,
+      message: target_price
+        ? `I'll email you at ${email} if ${origin} to ${destination} drops below $${target_price}.`
+        : `I'll email you at ${email} if the price for ${origin} to ${destination} drops.`,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Could not register price watch." });
   }
 });
 
